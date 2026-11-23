@@ -1,0 +1,333 @@
+================================================================================
+RESTAURANT FOOD DELIVERY ROBOT
+HARDWARE AND WIRING REFERENCE
+================================================================================
+
+The system has three microcontroller nodes and one laptop, all joined over WiFi
+through an MQTT broker running on the laptop.
+
+  Node            Board    Purpose
+  --------------  -------  --------------------------------------------------
+  Table 1         ESP32    RFID ordering terminal at table 1
+  Table 2         ESP32    RFID ordering terminal at table 2
+  Car             ESP32    Line following delivery robot
+  Kitchen         Laptop   MQTT broker and chef dashboard
+
+Table 1 and table 2 run the same sketch. Only the TABLE_NUMBER value at the top
+of the file differs.
+
+
+================================================================================
+1. TABLE CIRCUIT
+================================================================================
+
+Two identical builds, one per table.
+
+COMPONENTS
+  1 x ESP32 development board
+  1 x RC522 RFID reader module (13.56 MHz)
+  1 x 20x4 character LCD with I2C backpack
+  9 x MIFARE 1KB RFID cards per table
+
+  No buzzer is fitted. GPIO 26 is free.
+
+
+RC522 RFID MODULE -> ESP32
+  SDA (SS)   ->  GPIO 5
+  SCK        ->  GPIO 18
+  MOSI       ->  GPIO 23
+  MISO       ->  GPIO 19
+  IRQ        ->  not connected
+  GND        ->  GND
+  RST        ->  GPIO 27
+  3.3V       ->  3V3          NEVER 5V, it will damage the module
+
+  The RC522 runs on the ESP32 hardware SPI bus. Pins 18, 23 and 19 are the
+  default SPI pins, so SPI.begin() needs no arguments.
+
+
+20x4 I2C LCD -> ESP32
+  GND        ->  GND
+  VCC        ->  VIN (5V)
+  SDA        ->  GPIO 21
+  SCL        ->  GPIO 22
+
+  The I2C address is usually 0x27. If the screen stays blank or shows only
+  blocks, change it to 0x3F in the sketch. These are the only two addresses
+  these backpacks normally use.
+
+
+CARD ASSIGNMENT
+  Each table has its own set of nine cards. Any card works on either reader,
+  but a card used at the wrong table is flagged on line 4 of the LCD.
+
+  Position  Role        Table 1 UID      Table 2 UID
+  --------  ----------  ---------------  ---------------
+  1         START       50 33 7C 5C      C0 06 21 5C
+  2         CONFIRM     50 1D BF 5C      D3 5B D4 12
+  3         REDUCE      50 8B 68 5C      C3 28 AA 34
+  4         CALL CHEF   60 01 7E 5C      A3 0D 99 35
+  5         BURGER      50 76 38 5C      23 03 A6 34
+  6         PIZZA       50 AB 0A 5C      73 91 9F 35
+  7         FRIES       50 6A 86 5C      A3 54 88 35
+  8         PASTA       50 EF 9D 5C      43 D2 A7 34
+  9         COFFEE      50 7E 65 5C      A3 83 2E 30
+
+  START      clears any previous order and begins a new one
+  CONFIRM    sends the order to the kitchen laptop
+  REDUCE     removes one unit of the most recently added item
+  CALL CHEF  raises an alert on the kitchen dashboard
+
+
+LCD LAYOUT
+  Line 1  items
+  Line 2  items
+  Line 3  items
+  Line 4  details of the card just tapped, then the order status after CONFIRM
+
+  Items are packed two per line where they fit, for example
+  BURGER(2) PIZZA(6). If the items need more than three lines, the block
+  scrolls every two seconds. Line 4 never scrolls.
+
+
+================================================================================
+2. CAR CIRCUIT
+================================================================================
+
+COMPONENTS
+  1 x ESP32 development board
+  1 x TB6612FNG dual motor driver
+  2 x DC gear motors with wheels
+  1 x HX711 load cell amplifier
+  1 x bar load cell, 0 to 40 kg
+  1 x HC-SR04 ultrasonic sensor
+  1 x 8 channel IR line tracking array (6 channels used)
+  1 x active buzzer
+
+
+TB6612FNG MOTOR DRIVER -> ESP32
+  PWMA       ->  GPIO 4
+  AIN2       ->  GPIO 16
+  AIN1       ->  GPIO 17
+  STBY       ->  GPIO 5
+  BIN1       ->  GPIO 18
+  BIN2       ->  GPIO 19
+  PWMB       ->  GPIO 21
+  VCC        ->  3V3 or 5V (logic supply)
+  VM         ->  motor battery positive
+  GND        ->  common ground
+
+  Channel A is called motor 1 in the sketches, channel B is motor 2.
+
+  IMPORTANT: the motors are wired so that the driver's normal forward levels
+  give reverse motion. All the sketches invert AIN1/AIN2 and BIN1/BIN2 in
+  software to compensate. Do not "fix" this in the wiring without also
+  removing the inversion from the code.
+
+  STBY is held LOW whenever both motors are stopped, which puts the driver
+  to sleep and stops it drawing current.
+
+
+HX711 LOAD CELL AMPLIFIER -> ESP32
+  VCC        ->  VIN (5V)
+  GND        ->  GND
+  CLK (SCK)  ->  GPIO 22
+  DAT (DOUT) ->  GPIO 23
+
+  At 3.3V the HX711 gives frozen or unreliable readings. It must be on 5V.
+
+  GPIO 23 is configured with an internal pull-up. A disconnected data wire
+  then reads HIGH and reports an error, instead of silently reading as zero.
+
+
+LOAD CELL -> HX711
+  RED        ->  E+  (labelled RED on the board)
+  BLACK      ->  E-  (labelled BLK)
+  WHITE      ->  A-  (labelled WHT)
+  GREEN      ->  A+  (labelled GRN)
+  YELLOW     ->  not connected (shield wire)
+  B+ and B-  ->  not connected (second channel, unused)
+
+  The bar cell only produces a signal when it bends. One end must be bolted
+  to a fixed base and the other to the platform, with spacers so the middle
+  is free to flex. Lying flat on a surface it reads a constant value.
+
+  Measured behaviour: about 160,800 counts with the platform empty. Roughly
+  4,000 counts per kilogram, so about 0.25 g per count in theory, but noise
+  of a few hundred counts makes the usable resolution nearer 75 g. That is
+  enough to detect a plate being placed or removed, which is all the system
+  needs.
+
+  The HX711 is read directly by the sketch rather than through a library.
+  The library's timing is disturbed by WiFi and other interrupts, which
+  corrupts individual bits and produces impossible readings such as 8388607
+  or 131072. The sketch clocks the chip slowly, takes nine samples, discards
+  any that do not cluster with the rest, and averages what is left. About
+  five to six of nine samples survive in normal conditions.
+
+
+HC-SR04 ULTRASONIC SENSOR -> ESP32
+  VCC        ->  VIN (5V)
+  GND        ->  GND
+  TRIG       ->  GPIO 27
+  ECHO       ->  GPIO 25 through a voltage divider
+
+  The ECHO pin outputs 5V and GPIO 25 tolerates only 3.3V, so a divider is
+  required. Two resistors: one from ECHO to the GPIO node, one from that node
+  to GND.
+
+  Ratio        Voltage at the pin   Verdict
+  -----------  -------------------  ---------------------------------------
+  4.6k / 4.6k  2.50 V               Marginal. The threshold for a logic HIGH
+                                    is about 2.48 V, so it may work but will
+                                    fail if the 5V rail sags.
+  2.3k / 4.6k  3.33 V               Recommended. Two 4.6k in parallel gives
+                                    the 2.3k upper leg.
+
+  A reading of zero from pulseIn means no echo came back within the timeout,
+  which is either nothing in range or a wiring fault.
+
+
+IR LINE TRACKING ARRAY -> ESP32
+  6 channels are used, connected to ADC1 pins:
+    GPIO 32, 33, 35, 34, 36, 39
+
+  IR1 and IR8 are not connected.
+  The board's IR enable pin is tied directly to VCC.
+  VCC -> 3.3V or 5V depending on the module, GND -> GND.
+
+  All six are on ADC1, which is required because ADC2 cannot be used while
+  WiFi is active on the ESP32.
+
+  GPIO 34, 35, 36 and 39 are input only. They have no internal pull-ups and
+  cannot drive anything. This is fine for analog sensor reads but means none
+  of them can ever be used for an output such as the sonar TRIG line.
+
+  The physical left to right order of these six channels has not been
+  confirmed. The sketch lists them in an array at the top and the order must
+  match the arrangement on the car, otherwise steering corrections push the
+  car away from the line instead of back onto it.
+
+
+ACTIVE BUZZER -> ESP32
+  +  (VCC)   ->  GPIO 12
+  -  (GND)   ->  GND
+
+  GPIO 12 is a strapping pin. If anything holds it HIGH during power up the
+  ESP32 will not boot. Active buzzer modules normally idle LOW so this is
+  usually safe, but if the board stops booting after the buzzer is fitted,
+  move it to GPIO 13 or 14.
+
+
+================================================================================
+3. PIN SUMMARY
+================================================================================
+
+TABLE ESP32
+  GPIO 5    RC522 SS
+  GPIO 18   RC522 SCK
+  GPIO 19   RC522 MISO
+  GPIO 21   LCD SDA
+  GPIO 22   LCD SCL
+  GPIO 23   RC522 MOSI
+  GPIO 26   free
+  GPIO 27   RC522 RST
+
+CAR ESP32
+  GPIO 4    TB6612FNG PWMA
+  GPIO 5    TB6612FNG STBY
+  GPIO 12   buzzer
+  GPIO 16   TB6612FNG AIN2
+  GPIO 17   TB6612FNG AIN1
+  GPIO 18   TB6612FNG BIN1
+  GPIO 19   TB6612FNG BIN2
+  GPIO 21   TB6612FNG PWMB
+  GPIO 22   HX711 CLK
+  GPIO 23   HX711 DAT
+  GPIO 25   HC-SR04 ECHO (through divider)
+  GPIO 27   HC-SR04 TRIG
+  GPIO 32   IR channel 1
+  GPIO 33   IR channel 2
+  GPIO 34   IR channel 4   input only
+  GPIO 35   IR channel 3   input only
+  GPIO 36   IR channel 5   input only
+  GPIO 39   IR channel 6   input only
+
+  Note that GPIO 5, 18, 19, 21, 22 and 23 carry different signals on the two
+  boards. The same pin number means the RFID reader on a table board and the
+  motor driver or load cell on the car board.
+
+
+================================================================================
+4. POWER
+================================================================================
+
+  Tables      USB or a 5V supply to VIN. Current draw is small.
+
+  Car         The motors must have their own battery feeding TB6612FNG VM.
+              The ESP32 can run from USB or its own regulator. All grounds
+              must be joined at one point.
+
+              Sharing a single supply between the motors and the ESP32
+              causes brownouts. A stalled motor drags the rail down far
+              enough to reset the board, which looks in the serial log like
+              the car stopping for no reason part way through a sequence.
+
+  HX711       Must be on 5V. Keep its data and clock wires short and away
+              from the motor wiring. Long wires near the motors raise the
+              corruption rate to the point where the filter can no longer
+              recover a usable reading. A 100 nF capacitor across the
+              HX711 VCC and GND helps.
+
+
+================================================================================
+5. TRACK LAYOUT
+================================================================================
+
+  The track is a black line on a light floor, shaped as a Y.
+
+    Station -> stem -> junction -> right branch -> table 1
+                                -> left branch  -> table 2
+
+  Outbound, the car reaches the junction and commits to one branch.
+  On the way home the two branches merge into the stem, so no decision is
+  needed and the car simply follows the line until it ends at the station.
+
+  The line ending is what tells the car it has arrived. Both the table ends
+  and the station end must therefore be a clean stop, with no line beyond.
+
+
+================================================================================
+6. MQTT TOPICS
+================================================================================
+
+  The broker runs on the kitchen laptop, port 1883, anonymous access.
+
+  Topic                            Direction          Payload
+  -------------------------------  -----------------  ----------------------
+  restaurant/table1/order          table -> kitchen   order as JSON
+  restaurant/table1/status         kitchen -> table   1 to 5, retained
+  restaurant/table1/call           table -> kitchen   {"table":1}
+  restaurant/table1/reset          table -> kitchen   {"table":1}
+  restaurant/table1/presence       table -> kitchen   online / offline
+  restaurant/table2/...            same set for table 2
+  restaurant/car/command           kitchen -> car     {"table":1}
+  restaurant/car/state             car -> kitchen     idle / moving /
+                                                      at_table / returning
+  restaurant/car/presence          car -> kitchen     online / offline
+
+  Order status values
+    1  order requested
+    2  order accepted
+    3  order processing
+    4  order finished
+    5  order delivered
+
+  Presence uses an MQTT last will, so the broker announces a node as offline
+  by itself if that node loses power or WiFi. Detection takes roughly 22
+  seconds, which is the keepalive timeout rather than a fault.
+
+
+================================================================================
+END OF DOCUMENT
+================================================================================
